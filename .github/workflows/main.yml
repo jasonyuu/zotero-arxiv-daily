@@ -25,46 +25,104 @@ jobs:
           import os
           import requests
 
+          API_KEY = os.environ["IEEE_API_KEY"]
+
           url = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 
-          params = {
-              "apikey": os.environ["IEEE_API_KEY"],
-              "querytext": "permanent magnet synchronous motor",
-              "start_year": 2022,
-              "end_year": 2026,
-              "max_records": 10,
-              "start_record": 1,
-          }
+          tests = [
+              {
+                  "name": "TEST 1 - Minimal",
+                  "params": {
+                      "apikey": API_KEY,
+                      "querytext": "motor",
+                      "max_records": 1,
+                  },
+              },
+              {
+                  "name": "TEST 2 - Five Years",
+                  "params": {
+                      "apikey": API_KEY,
+                      "querytext": "permanent magnet synchronous motor",
+                      "start_year": 2022,
+                      "end_year": 2026,
+                      "max_records": 10,
+                      "start_record": 1,
+                  },
+              },
+              {
+                  "name": "TEST 3 - Explicit JSON",
+                  "params": {
+                      "apikey": API_KEY,
+                      "querytext": "motor",
+                      "max_records": 1,
+                      "format": "json",
+                  },
+              },
+          ]
 
-          headers = {
-              "Accept": "application/json",
-              "User-Agent": "Mozilla/5.0",
-          }
+          headers_list = [
+              {
+                  "Accept": "application/json",
+                  "User-Agent": "Mozilla/5.0",
+              },
+              {
+                  "Accept": "application/json",
+                  "User-Agent": "zotero-arxiv-daily/1.0",
+              },
+          ]
 
-          r = requests.get(
-              url,
-              params=params,
-              headers=headers,
-              timeout=30,
-          )
+          for test in tests:
 
-          print("========================================")
-          print("IEEE API TEST")
-          print("========================================")
-          print("HTTP:", r.status_code)
-          print("Content-Type:", r.headers.get("Content-Type"))
+              print()
+              print("========================================")
+              print(test["name"])
+              print("========================================")
 
-          safe_url = r.url.replace(
-              os.environ["IEEE_API_KEY"],
-              "***"
-          )
+              for i, headers in enumerate(headers_list, 1):
 
-          print("URL:", safe_url)
+                  try:
 
-          print("========================================")
-          print("Response:")
-          print(r.text[:2000])
-          print("========================================")
+                      r = requests.get(
+                          url,
+                          params=test["params"],
+                          headers=headers,
+                          timeout=30,
+                      )
+
+                      print(
+                          f"Header test {i}: "
+                          f"HTTP {r.status_code}"
+                      )
+
+                      print(
+                          "Content-Type:",
+                          r.headers.get("Content-Type")
+                      )
+
+                      safe_url = r.url.replace(
+                          API_KEY,
+                          "***"
+                      )
+
+                      print(
+                          "URL:",
+                          safe_url
+                      )
+
+                      print(
+                          "Response:",
+                          r.text[:500]
+                      )
+
+                  except Exception as e:
+
+                      print(
+                          "ERROR:",
+                          repr(e)
+                      )
+
+                  print("----------------------------------------")
+
           PY
 
       - name: Run script
