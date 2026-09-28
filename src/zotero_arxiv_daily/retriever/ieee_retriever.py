@@ -12,14 +12,17 @@ from ..protocol import Paper
 @register_retriever("ieee")
 class IEEERetriever(BaseRetriever):
 
-    API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+    API_URL = (
+        "https://ieeexploreapi.ieee.org/"
+        "api/v1/search/articles"
+    )
 
     def __init__(self, config):
         super().__init__(config)
 
-        # =================================================
+        # =========================================================
         # IEEE API Key
-        # =================================================
+        # =========================================================
 
         self.api_key = os.getenv("IEEE_API_KEY")
 
@@ -28,19 +31,19 @@ class IEEERetriever(BaseRetriever):
                 "IEEE_API_KEY environment variable is missing"
             )
 
-        # =================================================
+        # =========================================================
         # 每个关键词最多获取多少篇
-        # =================================================
+        # =========================================================
 
         self.max_records = 10
 
-        # =================================================
-        # 自动计算近五年
+        # =========================================================
+        # 动态滚动近五年
         #
-        # 2026 -> 2022~2026
-        # 2027 -> 2023~2027
-        # 2028 -> 2024~2028
-        # =================================================
+        # 2026 -> 2022 ~ 2026
+        # 2027 -> 2023 ~ 2027
+        # 2028 -> 2024 ~ 2028
+        # =========================================================
 
         current_year = datetime.now().year
 
@@ -52,18 +55,18 @@ class IEEERetriever(BaseRetriever):
             f"{self.start_year}-{self.end_year}"
         )
 
-        # =================================================
+        # =========================================================
         # HTTP 设置
-        # =================================================
+        # =========================================================
 
         self.timeout = 30
 
-        # 两个关键词请求之间稍微等待一下
+        # 每个关键词请求之间稍微停一下
         self.request_interval = 1.0
 
-    # =====================================================
+    # =============================================================
     # 获取 IEEE 原始论文
-    # =====================================================
+    # =============================================================
 
     def _retrieve_raw_papers(self):
 
@@ -71,7 +74,7 @@ class IEEERetriever(BaseRetriever):
 
         keywords = self.retriever_config.keywords
 
-        # 用 DOI / publication_number / title 去重
+        # 用 DOI / publication number / title 去重
         seen_ids = set()
 
         for keyword in keywords:
@@ -82,10 +85,9 @@ class IEEERetriever(BaseRetriever):
 
             params = {
                 "apikey": self.api_key,
-
                 "querytext": keyword,
 
-                # 自动计算的近五年
+                # 动态近五年
                 "start_year": self.start_year,
                 "end_year": self.end_year,
 
@@ -106,16 +108,22 @@ class IEEERetriever(BaseRetriever):
                 []
             )
 
-            logger.info(
-                f"IEEE {keyword}: "
-                f"{len(articles)} papers"
+            total_records = data.get(
+                "total_records",
+                0
             )
 
-            # =================================================
-            # 去重
-            # =================================================
+            logger.info(
+                f"IEEE {keyword}: "
+                f"{len(articles)} papers returned, "
+                f"{total_records} total matches"
+            )
 
             for article in articles:
+
+                # =================================================
+                # 去重
+                # =================================================
 
                 article_id = (
                     article.get("doi")
@@ -142,9 +150,9 @@ class IEEERetriever(BaseRetriever):
                 self.request_interval
             )
 
-        # =====================================================
-        # 按发表年份从新到旧排序
-        # =====================================================
+        # =========================================================
+        # 按出版年份倒序
+        # =========================================================
 
         def get_year(article):
 
@@ -155,7 +163,6 @@ class IEEERetriever(BaseRetriever):
 
             try:
                 return int(value)
-
             except (
                 TypeError,
                 ValueError
@@ -174,130 +181,74 @@ class IEEERetriever(BaseRetriever):
 
         return raw_papers
 
-    # =====================================================
+    # =============================================================
     # IEEE API 请求
-    # =====================================================
+    # =============================================================
 
     def _request(self, params):
 
-        max_retries = 4
+        try:
 
-        for attempt in range(
-            1,
-            max_retries + 1
-        ):
+            response = requests.get(
+                self.API_URL,
+                params=params,
+                timeout=self.timeout,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0",
+                },
+            )
 
-            try:
+            # =====================================================
+            # 正常
+            # =====================================================
 
-                response = requests.get(
-                    self.API_URL,
-                    params=params,
-                    timeout=self.timeout,
-                    headers={
-                        "Accept": "application/json",
-                        "User-Agent": (
-                            "zotero-arxiv-daily/1.0 "
-                            "(IEEE Xplore Metadata API client)"
-                        ),
-                    },
-                )
+            if response.status_code == 200:
 
-                # =================================================
-                # HTTP 200
-                # =================================================
-
-                if response.status_code == 200:
+                try:
 
                     return response.json()
 
-                # =================================================
-                # 这些状态码进行重试
-                # =================================================
-
-                if response.status_code in (
-                    418,
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                ):
-
-                    wait_seconds = 5 * attempt
+                except ValueError as e:
 
                     logger.warning(
-                        f"IEEE API returned HTTP "
-                        f"{response.status_code}. "
-                        f"Retry "
-                        f"{attempt}/{max_retries} "
-                        f"after "
-                        f"{wait_seconds}s."
+                        f"IEEE JSON decode failed: {e}"
                     )
 
-                    if attempt < max_retries:
+                    return None
 
-                        time.sleep(
-                            wait_seconds
-                        )
+            # =====================================================
+            # API 返回错误
+            # =====================================================
 
-                        continue
+            logger.warning(
+                f"IEEE request failed: "
+                f"HTTP {response.status_code}"
+            )
 
-                # =================================================
-                # 其他错误
-                # =================================================
+            logger.warning(
+                f"IEEE response: "
+                f"{response.text[:500]}"
+            )
 
-                logger.warning(
-                    f"IEEE request failed: "
-                    f"HTTP {response.status_code} - "
-                    f"{response.text[:500]}"
-                )
+            return None
 
-                return None
+        except requests.RequestException as e:
 
-            except requests.RequestException as e:
+            logger.warning(
+                f"IEEE request exception: {e}"
+            )
 
-                wait_seconds = 5 * attempt
+            return None
 
-                logger.warning(
-                    f"IEEE request exception: "
-                    f"{e}. Retry "
-                    f"{attempt}/{max_retries} "
-                    f"after {wait_seconds}s."
-                )
-
-                if attempt < max_retries:
-
-                    time.sleep(
-                        wait_seconds
-                    )
-
-                    continue
-
-                return None
-
-            except ValueError as e:
-
-                logger.warning(
-                    f"IEEE JSON decode failed: "
-                    f"{e}"
-                )
-
-                return None
-
-        return None
-
-    # =====================================================
-    # IEEE 原始数据转换为 Paper
-    # =====================================================
+    # =============================================================
+    # IEEE 原始数据 → Paper
+    # =============================================================
 
     def convert_to_paper(
         self,
         raw_paper
     ):
-
-        # =================================================
-        # 标题
-        # =================================================
 
         title = raw_paper.get(
             "title",
@@ -307,9 +258,9 @@ class IEEERetriever(BaseRetriever):
         if not title:
             return None
 
-        # =================================================
+        # =========================================================
         # 作者
-        # =================================================
+        # =========================================================
 
         authors = []
 
@@ -330,18 +281,18 @@ class IEEERetriever(BaseRetriever):
             if name:
                 authors.append(name)
 
-        # =================================================
+        # =========================================================
         # 摘要
-        # =================================================
+        # =========================================================
 
         abstract = raw_paper.get(
             "abstract",
             ""
         )
 
-        # =================================================
-        # IEEE Xplore 页面
-        # =================================================
+        # =========================================================
+        # IEEE 页面
+        # =========================================================
 
         url = raw_paper.get(
             "html_url",
@@ -355,17 +306,17 @@ class IEEERetriever(BaseRetriever):
                 ""
             )
 
-        # =================================================
+        # =========================================================
         # PDF
-        # =================================================
+        # =========================================================
 
         pdf_url = raw_paper.get(
             "pdf_url"
         )
 
-        # =================================================
-        # 转换成项目统一 Paper
-        # =================================================
+        # =========================================================
+        # Paper
+        # =========================================================
 
         return Paper(
             source=self.name,
