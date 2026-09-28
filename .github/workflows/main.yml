@@ -17,6 +17,56 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Test IEEE API
+        env:
+          IEEE_API_KEY: ${{ secrets.IEEE_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          url = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+
+          params = {
+              "apikey": os.environ["IEEE_API_KEY"],
+              "querytext": "permanent magnet synchronous motor",
+              "start_year": 2022,
+              "end_year": 2026,
+              "max_records": 10,
+              "start_record": 1,
+          }
+
+          headers = {
+              "Accept": "application/json",
+              "User-Agent": "Mozilla/5.0",
+          }
+
+          r = requests.get(
+              url,
+              params=params,
+              headers=headers,
+              timeout=30,
+          )
+
+          print("========================================")
+          print("IEEE API TEST")
+          print("========================================")
+          print("HTTP:", r.status_code)
+          print("Content-Type:", r.headers.get("Content-Type"))
+
+          safe_url = r.url.replace(
+              os.environ["IEEE_API_KEY"],
+              "***"
+          )
+
+          print("URL:", safe_url)
+
+          print("========================================")
+          print("Response:")
+          print(r.text[:2000])
+          print("========================================")
+          PY
+
       - name: Run script
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
