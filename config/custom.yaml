@@ -10,18 +10,51 @@ email:
   smtp_port: 465
   sender_password: ${oc.env:SENDER_PASSWORD}
 
+
 llm:
   api:
     key: ${oc.env:OPENAI_API_KEY}
     base_url: ${oc.env:OPENAI_API_BASE}
+
   api_mode: chat_completion
+
   generation_kwargs:
     model: gpt-4o-mini
 
+
+
 source:
+
   arxiv:
-    category: ["cs.AI","cs.CV","cs.LG","cs.CL"]
+    category:
+      - cs.AI
+      - cs.CV
+      - cs.LG
+      - cs.CL
+
+
+  ieee:
+
+    keywords:
+
+      - '"permanent magnet synchronous motor"'
+
+      - '"multiphase permanent magnet motor"'
+
+      - '"dual three phase PMSM"'
+
+      - '"open winding motor drive"'
+
+      - '"fault tolerant permanent magnet motor"'
+
+      - '"traction motor"'
+
+
 
 executor:
+
   debug: ${oc.env:DEBUG,null}
-  source: ['arxiv']
+
+  source:
+    - arxiv
+    - ieee
