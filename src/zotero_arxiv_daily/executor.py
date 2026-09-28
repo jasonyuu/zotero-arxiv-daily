@@ -46,6 +46,10 @@ class Executor:
 
         self.config = config
 
+        # =========================================================
+        # Zotero collection filtering
+        # =========================================================
+
         self.include_path_patterns = normalize_path_patterns(
             config.zotero.include_path,
             "include_path"
@@ -56,14 +60,26 @@ class Executor:
             "ignore_path"
         )
 
+        # =========================================================
+        # Retrievers
+        # =========================================================
+
         self.retrievers = {
             source: get_retriever_cls(source)(config)
             for source in config.executor.source
         }
 
+        # =========================================================
+        # Reranker
+        # =========================================================
+
         self.reranker = get_reranker_cls(
             config.executor.reranker
         )(config)
+
+        # =========================================================
+        # OpenAI / LLM
+        # =========================================================
 
         self.openai_client = OpenAI(
             api_key=config.llm.api.key,
@@ -71,7 +87,7 @@ class Executor:
         )
 
         # =========================================================
-        # EasyScholar SCI 分区
+        # EasyScholar SCI ranking
         # =========================================================
 
         self.sci_ranker = EasyScholarRanker()
@@ -196,24 +212,32 @@ class Executor:
             or self.ignore_path_patterns
         ):
 
-            samples = random.sample(
-                corpus,
-                min(5, len(corpus))
-            )
+            if corpus:
 
-            samples = "\n".join(
-                [
-                    c.title
-                    + " - "
-                    + "\n".join(c.paths)
-                    for c in samples
-                ]
-            )
+                samples = random.sample(
+                    corpus,
+                    min(5, len(corpus))
+                )
 
-            logger.info(
-                f"Selected {len(corpus)} zotero papers:\n"
-                f"{samples}\n..."
-            )
+                samples = "\n".join(
+                    [
+                        c.title
+                        + " - "
+                        + "\n".join(c.paths)
+                        for c in samples
+                    ]
+                )
+
+                logger.info(
+                    f"Selected {len(corpus)} zotero papers:\n"
+                    f"{samples}\n..."
+                )
+
+            else:
+
+                logger.info(
+                    "Selected 0 zotero papers after filtering."
+                )
 
         return corpus
 
@@ -224,10 +248,23 @@ class Executor:
     @staticmethod
     def paper_identity(paper):
 
-        if getattr(paper, "url", None):
-            return paper.url.strip().lower()
+        url = getattr(
+            paper,
+            "url",
+            None
+        )
 
-        return paper.title.strip().lower()
+        if url:
+
+            return url.strip().lower()
+
+        title = getattr(
+            paper,
+            "title",
+            ""
+        ) or ""
+
+        return title.strip().lower()
 
     # =============================================================
     # SCI / relevance sorting
@@ -235,7 +272,7 @@ class Executor:
     # SCI:
     # Q1 > Q2 > Q3 > Q4 > 未知
     #
-    # 同分区：
+    # 同 SCI 分区：
     # direction_score
     # >
     # reranker score
@@ -246,6 +283,10 @@ class Executor:
     @staticmethod
     def paper_rank_key(paper):
 
+        # =========================================================
+        # SCI quartile
+        # =========================================================
+
         sci_quartile = getattr(
             paper,
             "sci_quartile",
@@ -253,20 +294,29 @@ class Executor:
         )
 
         if sci_quartile is None:
+
             sci_score = 0
 
         else:
+
             try:
-                sci_quartile = int(sci_quartile)
+
+                sci_quartile = int(
+                    sci_quartile
+                )
 
                 if sci_quartile == 1:
                     sci_score = 5
+
                 elif sci_quartile == 2:
                     sci_score = 4
+
                 elif sci_quartile == 3:
                     sci_score = 3
+
                 elif sci_quartile == 4:
                     sci_score = 2
+
                 else:
                     sci_score = 0
 
@@ -274,7 +324,12 @@ class Executor:
                 TypeError,
                 ValueError
             ):
+
                 sci_score = 0
+
+        # =========================================================
+        # Direction relevance
+        # =========================================================
 
         direction_score = getattr(
             paper,
@@ -285,6 +340,20 @@ class Executor:
         if direction_score is None:
             direction_score = 0
 
+        try:
+            direction_score = float(
+                direction_score
+            )
+        except (
+            TypeError,
+            ValueError
+        ):
+            direction_score = 0
+
+        # =========================================================
+        # General reranker score
+        # =========================================================
+
         rerank_score = getattr(
             paper,
             "score",
@@ -294,6 +363,20 @@ class Executor:
         if rerank_score is None:
             rerank_score = 0
 
+        try:
+            rerank_score = float(
+                rerank_score
+            )
+        except (
+            TypeError,
+            ValueError
+        ):
+            rerank_score = 0
+
+        # =========================================================
+        # Publication year
+        # =========================================================
+
         publication_year = getattr(
             paper,
             "publication_year",
@@ -301,6 +384,16 @@ class Executor:
         )
 
         if publication_year is None:
+            publication_year = 0
+
+        try:
+            publication_year = int(
+                publication_year
+            )
+        except (
+            TypeError,
+            ValueError
+        ):
             publication_year = 0
 
         return (
@@ -320,29 +413,86 @@ class Executor:
         keywords
     ):
 
+        # =========================================================
+        # 清理关键词
+        # =========================================================
+
+        keywords = [
+            str(keyword).strip()
+            for keyword in keywords
+            if keyword is not None
+            and str(keyword).strip()
+        ]
+
         n = len(keywords)
 
         if n == 0:
+
+            logger.warning(
+                "No IEEE keywords configured."
+            )
+
             return []
 
+        expected_candidates = n * 10
+        expected_final = n * 2
+
         logger.info(
-            f"Starting final paper selection: "
-            f"{len(papers)} candidates, "
-            f"{n} directions"
+            "=================================================="
         )
 
+        logger.info(
+            "Final paper selection"
+        )
+
+        logger.info(
+            f"Keyword count: {n}"
+        )
+
+        logger.info(
+            f"Expected IEEE candidate count: "
+            f"{expected_candidates}"
+        )
+
+        logger.info(
+            f"Actual candidate count: "
+            f"{len(papers)}"
+        )
+
+        logger.info(
+            f"Expected final paper count: "
+            f"{expected_final}"
+        )
+
+        logger.info(
+            "=================================================="
+        )
+
+        # =========================================================
+        # 如果 IEEE Retriever 没有返回预期数量，给出警告
+        # =========================================================
+
+        if len(papers) != expected_candidates:
+
+            logger.warning(
+                "IEEE candidate count differs from expected: "
+                f"expected={expected_candidates}, "
+                f"actual={len(papers)}"
+            )
+
         selected = []
+
         selected_ids = set()
 
         # =========================================================
         # 第一阶段
         #
-        # 每个关键词 / 研究方向选择 1 篇
+        # 每个关键词选择 1 篇
         # =========================================================
 
         logger.info(
-            f"Stage 1: selecting "
-            f"1 paper from each of {n} directions"
+            f"Stage 1: selecting 1 paper "
+            f"from each of {n} directions"
         )
 
         for keyword in keywords:
@@ -350,11 +500,14 @@ class Executor:
             direction_papers = [
                 p
                 for p in papers
-                if getattr(
-                    p,
-                    "research_direction",
-                    None
-                ) == keyword
+                if (
+                    getattr(
+                        p,
+                        "research_direction",
+                        None
+                    )
+                    == keyword
+                )
             ]
 
             if not direction_papers:
@@ -366,14 +519,14 @@ class Executor:
 
                 continue
 
+            # -----------------------------------------------------
+            # 当前方向内部排序
+            # -----------------------------------------------------
+
             direction_papers.sort(
                 key=self.paper_rank_key,
                 reverse=True
             )
-
-            # =====================================================
-            # 找该方向排名最高、且尚未被其他方向选走的论文
-            # =====================================================
 
             selected_paper = None
 
@@ -384,7 +537,9 @@ class Executor:
                 )
 
                 if candidate_id not in selected_ids:
+
                     selected_paper = candidate
+
                     break
 
             if selected_paper is None:
@@ -408,16 +563,31 @@ class Executor:
                 paper_id
             )
 
+            quartile = getattr(
+                selected_paper,
+                "sci_quartile",
+                None
+            )
+
+            quartile_text = (
+                f"Q{quartile}"
+                if quartile is not None
+                else "Unknown"
+            )
+
             logger.info(
-                f"[Direction] {keyword} -> "
-                f"{selected_paper.title} "
-                f"(SCI Q{getattr(selected_paper, 'sci_quartile', '?')})"
+                f"[Direction] "
+                f"{keyword} -> "
+                f"{selected_paper.title} | "
+                f"SCI={quartile_text} | "
+                f"direction_score="
+                f"{getattr(selected_paper, 'direction_score', 0):.4f}"
             )
 
         # =========================================================
         # 第二阶段
         #
-        # 从所有剩余论文中再选择 N 篇
+        # 从剩余所有论文中选择 N 篇
         # =========================================================
 
         remaining = [
@@ -432,16 +602,15 @@ class Executor:
             reverse=True
         )
 
-        additional_count = n
-
         logger.info(
             f"Stage 2: selecting "
-            f"{additional_count} additional global papers"
+            f"{n} additional global papers"
         )
 
         for paper in remaining:
 
-            if len(selected) >= 2 * n:
+            if len(selected) >= expected_final:
+
                 break
 
             paper_id = self.paper_identity(
@@ -449,6 +618,7 @@ class Executor:
             )
 
             if paper_id in selected_ids:
+
                 continue
 
             selected.append(
@@ -459,18 +629,48 @@ class Executor:
                 paper_id
             )
 
+            quartile = getattr(
+                paper,
+                "sci_quartile",
+                None
+            )
+
+            quartile_text = (
+                f"Q{quartile}"
+                if quartile is not None
+                else "Unknown"
+            )
+
             logger.info(
-                f"[Global] {paper.title} "
-                f"(SCI Q{getattr(paper, 'sci_quartile', '?')})"
+                f"[Global] "
+                f"{paper.title} | "
+                f"SCI={quartile_text} | "
+                f"direction="
+                f"{getattr(paper, 'research_direction', '?')} | "
+                f"direction_score="
+                f"{getattr(paper, 'direction_score', 0):.4f}"
             )
 
         # =========================================================
-        # 最终结果
+        # 最终检查
         # =========================================================
 
+        if len(selected) < expected_final:
+
+            logger.warning(
+                f"Could not reach expected final count: "
+                f"{len(selected)} / {expected_final}"
+            )
+
+        else:
+
+            logger.info(
+                f"Final paper count: "
+                f"{len(selected)} / {expected_final}"
+            )
+
         logger.info(
-            f"Final paper count: "
-            f"{len(selected)} / {2 * n}"
+            "=================================================="
         )
 
         return selected
@@ -483,6 +683,12 @@ class Executor:
 
         # =========================================================
         # 1. Zotero corpus
+        #
+        # 注意：
+        # Zotero 仍然读取。
+        #
+        # 但新的 reranker 不再拿 Zotero corpus
+        # 与 IEEE 候选论文做 60 × 1429 的相似度计算。
         # =========================================================
 
         corpus = self.fetch_zotero_corpus()
@@ -502,7 +708,14 @@ class Executor:
             return
 
         # =========================================================
-        # 2. Retrieve IEEE papers
+        # 2. Retrieve papers
+        #
+        # IEEE:
+        #
+        # 6 keywords × 10 papers
+        # = 60 candidates
+        #
+        # 不在这里使用 executor.max_paper_num 截断。
         # =========================================================
 
         all_papers = []
@@ -539,6 +752,18 @@ class Executor:
 
         # =========================================================
         # 3. Reranking
+        #
+        # 新逻辑：
+        #
+        # IEEE paper
+        #      ↓
+        # 自己的 research_direction
+        #
+        # 不再：
+        #
+        # IEEE paper
+        #      ↓
+        # 1429 Zotero papers
         # =========================================================
 
         reranked_papers = []
@@ -546,7 +771,7 @@ class Executor:
         if len(all_papers) > 0:
 
             logger.info(
-                "Reranking papers..."
+                "Reranking papers by research direction..."
             )
 
             reranked_papers = self.reranker.rerank(
@@ -559,12 +784,30 @@ class Executor:
                 f"{len(reranked_papers)} papers"
             )
 
-            # =====================================================
-            # EasyScholar SCI 分区
-            # =====================================================
+        elif not self.config.executor.send_empty:
 
             logger.info(
-                "Querying EasyScholar SCI quartiles..."
+                "No new papers found. "
+                "No email will be sent."
+            )
+
+            return
+
+        # =========================================================
+        # 4. EasyScholar SCI quartile
+        #
+        # 对全部候选论文查询。
+        #
+        # 注意：
+        # 这里只是查询和排序。
+        # LLM 还没有调用。
+        # =========================================================
+
+        if reranked_papers:
+
+            logger.info(
+                "Querying EasyScholar SCI quartiles "
+                f"for {len(reranked_papers)} candidates..."
             )
 
             for paper in tqdm(
@@ -576,25 +819,23 @@ class Executor:
                     paper
                 )
 
-        elif not self.config.executor.send_empty:
-
             logger.info(
-                "No new papers found. "
-                "No email will be sent."
+                "EasyScholar SCI enrichment completed."
             )
 
-            return
-
         # =========================================================
-        # 4. 最终筛选
+        # 5. Final selection
         #
-        # N = keyword 数量
+        # N 个关键词
         #
-        # 候选：
-        #     N × 10
+        # 第一阶段：
+        #     N 篇
+        #
+        # 第二阶段：
+        #     N 篇
         #
         # 最终：
-        #     N + N = 2N
+        #     2N 篇
         # =========================================================
 
         if reranked_papers:
@@ -631,7 +872,13 @@ class Executor:
             )
 
         # =========================================================
-        # 5. 只对最终论文调用 LLM
+        # 6. 只对最终论文调用 LLM
+        #
+        # 例如：
+        #
+        # 6 keywords
+        # → 12 papers
+        # → 只有这 12 篇进入 LLM
         # =========================================================
 
         if reranked_papers:
@@ -656,12 +903,22 @@ class Executor:
                     self.config.llm
                 )
 
+        elif not self.config.executor.send_empty:
+
+            logger.info(
+                "No final papers selected. "
+                "No email will be sent."
+            )
+
+            return
+
         # =========================================================
-        # 6. Send email
+        # 7. Send email
         # =========================================================
 
         logger.info(
-            "Sending email..."
+            f"Preparing email for "
+            f"{len(reranked_papers)} papers..."
         )
 
         email_content = render_email(
