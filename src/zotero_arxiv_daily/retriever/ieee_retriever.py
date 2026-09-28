@@ -144,7 +144,8 @@ class IEEERetriever(BaseRetriever):
 
                 seen_ids.add(article_id)
 
-                raw_papers.append(article)
+                article["_research_direction"] = keyword
+		raw_papers.append(article)
 
             time.sleep(
                 self.request_interval
@@ -314,16 +315,39 @@ class IEEERetriever(BaseRetriever):
             "pdf_url"
         )
 
+	research_direction = raw_paper.get(
+	    "_research_direction",
+	    ""
+	)
+
+	journal = raw_paper.get(
+   	 "publication_title",
+   	 ""
+	)
+
+	publication_year = raw_paper.get(
+    	"publication_year"
+	)
+
+	try:
+ 	   publication_year = int(publication_year)
+	except (TypeError, ValueError):
+  	  publication_year = None
+
         # =========================================================
         # Paper
         # =========================================================
 
         return Paper(
-            source=self.name,
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            url=url,
-            pdf_url=pdf_url,
-            full_text=None
-        )
+   		 source=self.name,
+   		 title=title,
+   		 authors=authors,
+   		 abstract=abstract,
+   		 url=url,
+  		  pdf_url=pdf_url,
+  		  full_text=None,
+
+  		  research_direction=research_direction,
+  		  journal=journal,
+  		  publication_year=publication_year,
+	)

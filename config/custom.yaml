@@ -43,11 +43,13 @@ source:
 
       - '"dual three phase PMSM"'
 
-      - '"open winding motor drive"'
+      - '"high-speed motor"'
 
       - '"fault tolerant permanent magnet motor"'
 
       - '"traction motor"'
+      - '"electric vehicle motor"'
+      - '"High power density motor"'
 
 
 
