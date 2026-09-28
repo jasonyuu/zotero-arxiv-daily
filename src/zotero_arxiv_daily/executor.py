@@ -17,6 +17,7 @@ from openai import OpenAI
 from tqdm import tqdm
 from .sci_ranker import EasyScholarRanker
 
+
 def normalize_path_patterns(
     patterns: list[str] | ListConfig | None,
     config_key: str
@@ -68,10 +69,16 @@ class Executor:
             api_key=config.llm.api.key,
             base_url=config.llm.api.base_url
         )
-	self.sci_ranker = EasyScholarRanker()
-    # ============================================================
+
+        # =========================================================
+        # EasyScholar SCI 分区
+        # =========================================================
+
+        self.sci_ranker = EasyScholarRanker()
+
+    # =============================================================
     # Zotero
-    # ============================================================
+    # =============================================================
 
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
 
@@ -79,7 +86,7 @@ class Executor:
 
         zot = zotero.Zotero(
             self.config.zotero.user_id,
-            'user',
+            "user",
             self.config.zotero.api_key
         )
 
@@ -88,40 +95,41 @@ class Executor:
         )
 
         collections = {
-            c['key']: c
+            c["key"]: c
             for c in collections
         }
 
         corpus = zot.everything(
             zot.items(
-                itemType='conferencePaper || journalArticle || preprint'
+                itemType="conferencePaper || journalArticle || preprint"
             )
         )
 
         corpus = [
-            c for c in corpus
-            if c['data']['abstractNote'] != ''
+            c
+            for c in corpus
+            if c["data"]["abstractNote"] != ""
         ]
 
         def get_collection_path(col_key: str) -> str:
 
-            if p := collections[col_key]['data']['parentCollection']:
+            if p := collections[col_key]["data"]["parentCollection"]:
                 return (
                     get_collection_path(p)
-                    + '/'
-                    + collections[col_key]['data']['name']
+                    + "/"
+                    + collections[col_key]["data"]["name"]
                 )
 
-            return collections[col_key]['data']['name']
+            return collections[col_key]["data"]["name"]
 
         for c in corpus:
 
             paths = [
                 get_collection_path(col)
-                for col in c['data']['collections']
+                for col in c["data"]["collections"]
             ]
 
-            c['paths'] = paths
+            c["paths"] = paths
 
         logger.info(
             f"Fetched {len(corpus)} zotero papers"
@@ -129,20 +137,20 @@ class Executor:
 
         return [
             CorpusPaper(
-                title=c['data']['title'],
-                abstract=c['data']['abstractNote'],
+                title=c["data"]["title"],
+                abstract=c["data"]["abstractNote"],
                 added_date=datetime.strptime(
-                    c['data']['dateAdded'],
-                    '%Y-%m-%dT%H:%M:%SZ'
+                    c["data"]["dateAdded"],
+                    "%Y-%m-%dT%H:%M:%SZ"
                 ),
-                paths=c['paths']
+                paths=c["paths"]
             )
             for c in corpus
         ]
 
-    # ============================================================
+    # =============================================================
     # Zotero filtering
-    # ============================================================
+    # =============================================================
 
     def filter_corpus(
         self,
@@ -193,11 +201,11 @@ class Executor:
                 min(5, len(corpus))
             )
 
-            samples = '\n'.join(
+            samples = "\n".join(
                 [
                     c.title
-                    + ' - '
-                    + '\n'.join(c.paths)
+                    + " - "
+                    + "\n".join(c.paths)
                     for c in samples
                 ]
             )
@@ -209,9 +217,9 @@ class Executor:
 
         return corpus
 
-    # ============================================================
+    # =============================================================
     # Paper identity
-    # ============================================================
+    # =============================================================
 
     @staticmethod
     def paper_identity(paper):
@@ -221,7 +229,7 @@ class Executor:
 
         return paper.title.strip().lower()
 
-    # ============================================================
+    # =============================================================
     # SCI / relevance sorting
     #
     # SCI:
@@ -233,7 +241,7 @@ class Executor:
     # reranker score
     # >
     # publication year
-    # ============================================================
+    # =============================================================
 
     @staticmethod
     def paper_rank_key(paper):
@@ -302,9 +310,9 @@ class Executor:
             publication_year
         )
 
-    # ============================================================
-    # 每个方向选1篇 + 全局再选N篇
-    # ============================================================
+    # =============================================================
+    # 每个方向选 1 篇 + 全局再选 N 篇
+    # =============================================================
 
     def select_final_papers(
         self,
@@ -324,13 +332,13 @@ class Executor:
         )
 
         selected = []
-
         selected_ids = set()
 
-        # --------------------------------------------------------
+        # =========================================================
         # 第一阶段
-        # 每个关键词/研究方向选择1篇
-        # --------------------------------------------------------
+        #
+        # 每个关键词 / 研究方向选择 1 篇
+        # =========================================================
 
         logger.info(
             f"Stage 1: selecting "
@@ -363,19 +371,34 @@ class Executor:
                 reverse=True
             )
 
-            selected_paper = direction_papers[0]
+            # =====================================================
+            # 找该方向排名最高、且尚未被其他方向选走的论文
+            # =====================================================
+
+            selected_paper = None
+
+            for candidate in direction_papers:
+
+                candidate_id = self.paper_identity(
+                    candidate
+                )
+
+                if candidate_id not in selected_ids:
+                    selected_paper = candidate
+                    break
+
+            if selected_paper is None:
+
+                logger.warning(
+                    f"All papers for direction "
+                    f"'{keyword}' were already selected."
+                )
+
+                continue
 
             paper_id = self.paper_identity(
                 selected_paper
             )
-
-            if paper_id in selected_ids:
-                logger.warning(
-                    f"Duplicate paper selected for "
-                    f"direction {keyword}: "
-                    f"{selected_paper.title}"
-                )
-                continue
 
             selected.append(
                 selected_paper
@@ -391,10 +414,11 @@ class Executor:
                 f"(SCI Q{getattr(selected_paper, 'sci_quartile', '?')})"
             )
 
-        # --------------------------------------------------------
+        # =========================================================
         # 第二阶段
-        # 从所有剩余论文中再选择N篇
-        # --------------------------------------------------------
+        #
+        # 从所有剩余论文中再选择 N 篇
+        # =========================================================
 
         remaining = [
             p
@@ -440,9 +464,9 @@ class Executor:
                 f"(SCI Q{getattr(paper, 'sci_quartile', '?')})"
             )
 
-        # --------------------------------------------------------
+        # =========================================================
         # 最终结果
-        # --------------------------------------------------------
+        # =========================================================
 
         logger.info(
             f"Final paper count: "
@@ -451,15 +475,15 @@ class Executor:
 
         return selected
 
-    # ============================================================
+    # =============================================================
     # Main
-    # ============================================================
+    # =============================================================
 
     def run(self):
 
-        # --------------------------------------------------------
+        # =========================================================
         # 1. Zotero corpus
-        # --------------------------------------------------------
+        # =========================================================
 
         corpus = self.fetch_zotero_corpus()
 
@@ -477,9 +501,9 @@ class Executor:
 
             return
 
-        # --------------------------------------------------------
+        # =========================================================
         # 2. Retrieve IEEE papers
-        # --------------------------------------------------------
+        # =========================================================
 
         all_papers = []
 
@@ -513,9 +537,9 @@ class Executor:
             f"retrieved from all sources"
         )
 
-        # --------------------------------------------------------
+        # =========================================================
         # 3. Reranking
-        # --------------------------------------------------------
+        # =========================================================
 
         reranked_papers = []
 
@@ -534,18 +558,23 @@ class Executor:
                 f"Reranker returned "
                 f"{len(reranked_papers)} papers"
             )
+
+            # =====================================================
+            # EasyScholar SCI 分区
+            # =====================================================
+
             logger.info(
-                    "Querying EasyScholar SCI quartiles..."
+                "Querying EasyScholar SCI quartiles..."
             )
 
             for paper in tqdm(
-                        reranked_papers,
-                        desc="EasyScholar SCI"
+                reranked_papers,
+                desc="EasyScholar SCI"
             ):
-                        self.sci_ranker.enrich_paper(
-                        	paper
-                        )
 
+                self.sci_ranker.enrich_paper(
+                    paper
+                )
 
         elif not self.config.executor.send_empty:
 
@@ -556,7 +585,7 @@ class Executor:
 
             return
 
-        # --------------------------------------------------------
+        # =========================================================
         # 4. 最终筛选
         #
         # N = keyword 数量
@@ -566,9 +595,17 @@ class Executor:
         #
         # 最终：
         #     N + N = 2N
-        # --------------------------------------------------------
+        # =========================================================
 
         if reranked_papers:
+
+            if "ieee" not in self.retrievers:
+
+                logger.error(
+                    "IEEE retriever is not configured."
+                )
+
+                return
 
             keywords = list(
                 self.retrievers["ieee"]
@@ -593,9 +630,9 @@ class Executor:
                 )
             )
 
-        # --------------------------------------------------------
+        # =========================================================
         # 5. 只对最终论文调用 LLM
-        # --------------------------------------------------------
+        # =========================================================
 
         if reranked_papers:
 
@@ -605,7 +642,8 @@ class Executor:
             )
 
             for p in tqdm(
-                reranked_papers
+                reranked_papers,
+                desc="Generating LLM content"
             ):
 
                 p.generate_tldr(
@@ -618,9 +656,9 @@ class Executor:
                     self.config.llm
                 )
 
-        # --------------------------------------------------------
+        # =========================================================
         # 6. Send email
-        # --------------------------------------------------------
+        # =========================================================
 
         logger.info(
             "Sending email..."
