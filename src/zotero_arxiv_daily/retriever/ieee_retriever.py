@@ -61,8 +61,55 @@ class IEEERetriever(BaseRetriever):
 
         self.timeout = 30
 
-        # 每个关键词请求之间稍微停一下
-        self.request_interval = 1.0
+        # IEEE API 请求之间的基础间隔
+        #
+        # 不要设置得太短。
+        # 这里使用 2 秒，避免连续请求触发 QPS 限制。
+        #
+        # 6 个关键词正常情况下大约需要 12 秒以上。
+        # =========================================================
+
+        self.request_interval = 2.0
+
+        # =========================================================
+        # IEEE 限流后的重试设置
+        # =========================================================
+
+        self.max_retries = 3
+
+        # 遇到 418 / 429 / Service Over Qps 时：
+        #
+        # 第一次：等待 10 秒
+        # 第二次：等待 20 秒
+        # 第三次：等待 40 秒
+        #
+        # 不并发，不绕过 IEEE 限流。
+        # =========================================================
+
+        self.retry_backoff = [10, 20, 40]
+
+        # 上一次请求时间
+        self._last_request_time = 0.0
+
+    # =============================================================
+    # 请求前限速
+    # =============================================================
+
+    def _wait_before_request(self):
+        """
+        确保两个 IEEE API 请求之间至少间隔 request_interval 秒。
+        """
+
+        elapsed = time.monotonic() - self._last_request_time
+
+        if elapsed < self.request_interval:
+            wait_time = self.request_interval - elapsed
+
+            logger.info(
+                f"Waiting {wait_time:.1f}s before next IEEE request..."
+            )
+
+            time.sleep(wait_time)
 
     # =============================================================
     # 获取 IEEE 原始论文
@@ -72,14 +119,35 @@ class IEEERetriever(BaseRetriever):
 
         raw_papers = []
 
-        keywords = self.retriever_config.keywords
+        keywords = list(self.retriever_config.keywords)
 
-        # 用 DOI / publication number / title 去重
-        seen_ids = set()
+        if not keywords:
+            logger.warning(
+                "No IEEE keywords configured."
+            )
+            return raw_papers
 
-        for keyword in keywords:
+        # =========================================================
+        # 重要：
+        #
+        # 这里故意不做全局去重。
+        #
+        # 用户要求：
+        #
+        # N 个关键词
+        # 每个关键词 10 篇
+        # = N * 10 个候选
+        #
+        # 同一篇论文可能同时出现在多个关键词中。
+        # 这种重复不能在这里删除，否则无法保证候选池数量。
+        #
+        # 最终选择阶段再进行论文级去重。
+        # =========================================================
+
+        for index, keyword in enumerate(keywords, start=1):
 
             logger.info(
+                f"[{index}/{len(keywords)}] "
                 f"Searching IEEE: {keyword}"
             )
 
@@ -91,7 +159,7 @@ class IEEERetriever(BaseRetriever):
                 "start_year": self.start_year,
                 "end_year": self.end_year,
 
-                # 每个关键词最多10篇
+                # 每个关键词最多 10 篇
                 "max_records": self.max_records,
 
                 # 从第一条开始
@@ -101,6 +169,9 @@ class IEEERetriever(BaseRetriever):
             data = self._request(params)
 
             if data is None:
+                logger.warning(
+                    f"IEEE keyword '{keyword}' failed."
+                )
                 continue
 
             articles = data.get(
@@ -114,41 +185,39 @@ class IEEERetriever(BaseRetriever):
             )
 
             logger.info(
-                f"IEEE {keyword}: "
+                f"IEEE keyword '{keyword}': "
                 f"{len(articles)} papers returned, "
                 f"{total_records} total matches"
             )
 
+            # =====================================================
+            # 给每篇论文标记研究方向
+            # =====================================================
+
+            keyword_count = 0
+
             for article in articles:
 
-                # =================================================
-                # 去重
-                # =================================================
+                if not isinstance(article, dict):
+                    continue
 
-                article_id = (
-                    article.get("doi")
-                    or article.get("publication_number")
-                    or article.get("article_number")
-                    or article.get("title")
+                title = article.get(
+                    "title",
+                    ""
                 )
 
-                if not article_id:
+                if not title:
                     continue
-
-                article_id = str(
-                    article_id
-                ).strip().lower()
-
-                if article_id in seen_ids:
-                    continue
-
-                seen_ids.add(article_id)
 
                 article["_research_direction"] = keyword
-		raw_papers.append(article)
 
-            time.sleep(
-                self.request_interval
+                raw_papers.append(article)
+
+                keyword_count += 1
+
+            logger.info(
+                f"IEEE keyword '{keyword}': "
+                f"{keyword_count} candidates added"
             )
 
         # =========================================================
@@ -164,6 +233,7 @@ class IEEERetriever(BaseRetriever):
 
             try:
                 return int(value)
+
             except (
                 TypeError,
                 ValueError
@@ -175,10 +245,30 @@ class IEEERetriever(BaseRetriever):
             reverse=True
         )
 
-        logger.info(
-            f"IEEE total unique papers: "
-            f"{len(raw_papers)}"
+        # =========================================================
+        # 统计
+        # =========================================================
+
+        expected_count = (
+            len(keywords) * self.max_records
         )
+
+        logger.info(
+            f"IEEE candidate pool: "
+            f"{len(raw_papers)} papers"
+        )
+
+        logger.info(
+            f"IEEE expected candidate pool: "
+            f"{expected_count} papers"
+        )
+
+        if len(raw_papers) < expected_count:
+
+            logger.warning(
+                f"IEEE returned fewer candidates than expected: "
+                f"{len(raw_papers)}/{expected_count}"
+            )
 
         return raw_papers
 
@@ -188,59 +278,163 @@ class IEEERetriever(BaseRetriever):
 
     def _request(self, params):
 
-        try:
-
-            response = requests.get(
-                self.API_URL,
-                params=params,
-                timeout=self.timeout,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0",
-                },
-            )
+        for attempt in range(self.max_retries + 1):
 
             # =====================================================
-            # 正常
+            # 请求前限速
             # =====================================================
 
-            if response.status_code == 200:
+            self._wait_before_request()
 
-                try:
+            try:
 
-                    return response.json()
+                logger.info(
+                    f"IEEE API request "
+                    f"(attempt {attempt + 1}/{self.max_retries + 1})"
+                )
 
-                except ValueError as e:
+                response = requests.get(
+                    self.API_URL,
+                    params=params,
+                    timeout=self.timeout,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                )
+
+                # 记录请求完成时间
+                self._last_request_time = time.monotonic()
+
+                # =================================================
+                # HTTP 200
+                # =================================================
+
+                if response.status_code == 200:
+
+                    try:
+
+                        return response.json()
+
+                    except ValueError as e:
+
+                        logger.warning(
+                            f"IEEE JSON decode failed: {e}"
+                        )
+
+                        return None
+
+                # =================================================
+                # 限流
+                #
+                # 418
+                # 429
+                # 403 + Service Over Qps
+                # =================================================
+
+                response_text = response.text[:1000]
+
+                is_rate_limited = (
+                    response.status_code in {
+                        418,
+                        429,
+                    }
+                    or
+                    (
+                        response.status_code == 403
+                        and
+                        "Service Over Qps" in response.text
+                    )
+                )
+
+                if is_rate_limited:
 
                     logger.warning(
-                        f"IEEE JSON decode failed: {e}"
+                        f"IEEE rate limit detected: "
+                        f"HTTP {response.status_code}"
+                    )
+
+                    logger.warning(
+                        f"IEEE response: "
+                        f"{response_text[:500]}"
+                    )
+
+                    # 已经没有重试次数
+                    if attempt >= self.max_retries:
+
+                        logger.error(
+                            "IEEE rate limit retries exhausted."
+                        )
+
+                        return None
+
+                    wait_time = self.retry_backoff[
+                        min(
+                            attempt,
+                            len(self.retry_backoff) - 1
+                        )
+                    ]
+
+                    logger.warning(
+                        f"Waiting {wait_time}s "
+                        f"before IEEE retry..."
+                    )
+
+                    time.sleep(wait_time)
+
+                    continue
+
+                # =================================================
+                # 其他 HTTP 错误
+                # =================================================
+
+                logger.warning(
+                    f"IEEE request failed: "
+                    f"HTTP {response.status_code}"
+                )
+
+                logger.warning(
+                    f"IEEE response: "
+                    f"{response_text[:500]}"
+                )
+
+                return None
+
+            # =====================================================
+            # 网络异常
+            # =====================================================
+
+            except requests.RequestException as e:
+
+                self._last_request_time = time.monotonic()
+
+                logger.warning(
+                    f"IEEE request exception: {e}"
+                )
+
+                if attempt >= self.max_retries:
+
+                    logger.error(
+                        "IEEE network retries exhausted."
                     )
 
                     return None
 
-            # =====================================================
-            # API 返回错误
-            # =====================================================
+                wait_time = self.retry_backoff[
+                    min(
+                        attempt,
+                        len(self.retry_backoff) - 1
+                    )
+                ]
 
-            logger.warning(
-                f"IEEE request failed: "
-                f"HTTP {response.status_code}"
-            )
+                logger.warning(
+                    f"Waiting {wait_time}s "
+                    f"before network retry..."
+                )
 
-            logger.warning(
-                f"IEEE response: "
-                f"{response.text[:500]}"
-            )
+                time.sleep(wait_time)
 
-            return None
-
-        except requests.RequestException as e:
-
-            logger.warning(
-                f"IEEE request exception: {e}"
-            )
-
-            return None
+        return None
 
     # =============================================================
     # IEEE 原始数据 → Paper
@@ -315,39 +509,59 @@ class IEEERetriever(BaseRetriever):
             "pdf_url"
         )
 
-	research_direction = raw_paper.get(
-	    "_research_direction",
-	    ""
-	)
+        # =========================================================
+        # 研究方向
+        # =========================================================
 
-	journal = raw_paper.get(
-   	 "publication_title",
-   	 ""
-	)
+        research_direction = raw_paper.get(
+            "_research_direction",
+            ""
+        )
 
-	publication_year = raw_paper.get(
-    	"publication_year"
-	)
+        # =========================================================
+        # 期刊 / 会议名称
+        # =========================================================
 
-	try:
- 	   publication_year = int(publication_year)
-	except (TypeError, ValueError):
-  	  publication_year = None
+        journal = raw_paper.get(
+            "publication_title",
+            ""
+        )
+
+        # =========================================================
+        # 出版年份
+        # =========================================================
+
+        publication_year = raw_paper.get(
+            "publication_year"
+        )
+
+        try:
+
+            publication_year = int(
+                publication_year
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            publication_year = None
 
         # =========================================================
         # Paper
         # =========================================================
 
         return Paper(
-   		 source=self.name,
-   		 title=title,
-   		 authors=authors,
-   		 abstract=abstract,
-   		 url=url,
-  		  pdf_url=pdf_url,
-  		  full_text=None,
+            source=self.name,
+            title=title,
+            authors=authors,
+            abstract=abstract,
+            url=url,
+            pdf_url=pdf_url,
+            full_text=None,
 
-  		  research_direction=research_direction,
-  		  journal=journal,
-  		  publication_year=publication_year,
-	)
+            research_direction=research_direction,
+            journal=journal,
+            publication_year=publication_year,
+        )
